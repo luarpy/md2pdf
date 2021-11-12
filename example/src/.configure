@@ -1,0 +1,4 @@
+PAPER_SIZE="A5"
+TOC="--toc --toc-depth=4"
+MAIN_FONT="DejaVu Serif"
+MONO_FONT="DejaVu Sans Mono"

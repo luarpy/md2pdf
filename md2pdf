@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+
+# LICENSE: https://www.gnu.org/licenses/gpl-3.0.en.html
+
+# Load the configuration file if it exists in src/.config
+[ -f "$1/.config" ] && source "$1/.config"
+
+VERSION='0.1'
+
+main() {
+	test -n "$1" || usage
+	test -n "$2" || usage
+ 	test -d "$1" || no_dir "$1"
+ 	test -d "$2" || no_dir "$2"
+
+	src=$(readlink_f "$1")
+	dst=$(readlink_f "$2")
+
+	IGNORE=$(
+		if ! test -f "$src/.pdfignore"
+		then
+			printf ' ! -path "*/.*"'
+			return
+		fi
+		while read -r x
+		do
+			test -n "$x" || continue
+			printf ' ! -path "*/%s*"' "$x"
+		done < "$src/.pdfignore"
+	)
+
+	list_dirs "$src" |
+	(cd "$src" && cpio -pdu "$dst")
+
+
+	fs=$(
+        if [ -f "$dst/.files" ]; then 
+            list_affected_files "$src" "$dst/.files"
+        else
+            list_files "$1"
+        fi
+	)
+
+	if [ -n "$fs" ]; then
+		echo "$fs" | tee "$dst/.files" # Añade los archivos a la lista de procesados
+
+		if echo "$fs" | grep --quiet '\.md$'
+		then
+			if [ -x "$(which pandoc 2> /dev/null)" ] ; then
+				render_md_files_pandoc "$src" "$dst" 
+            else
+                echo "couldn't find pandoc"
+                exit 3
+			fi
+		fi
+
+		echo "$fs" | grep -E '\.pdf$' |	(cd "$src" && cpio -pu "$dst")
+	fi
+
+    printf "[${0##*/}] " >&2
+	print_status 'file, ' 'files, ' "$fs" >&2
+	echo >&2
+}
+
+readlink_f() {
+	local file="$1"
+	cd "$(dirname "$file")"
+	file=$(basename "$file")
+	while test -L "$file"; do
+		file=$(readlink "$file")
+		cd "$(dirname "$file")"
+		file=$(basename "$file")
+	done
+	local dir=$(pwd -P)
+	echo "$dir/$file"
+}
+
+realpath_f(){
+    realpath --relative-to="$2" "$1" | tr '/' '\n' | sed '0,/../{//d;}' | tr '\n' '/'
+}
+
+replace_path(){
+    [ "$PWD" != "$(readlink -f "$1")" ] && cd "$(readlink -f "$1")"
+    exit
+    local files="$(list_files "$1" | grep "\.html$" | sed 's|\./||g')"
+    while read file; do
+        sed -i 's|FCKING_PATH|'"$(realpath_f "$1" "$file")"'|g' "$file" --quiet 
+    done < <(echo "$files")
+
+}
+
+print_status() {
+	test -z "$3" && printf 'no %s' "$2" && return
+
+    echo "$3" | awk -v singular="$1" -v plural="$2" ' 
+    END {
+		if (NR==1) printf NR " " singular
+		if (NR>1) printf NR " " plural
+	}'
+}
+
+
+usage() {
+	echo "usage: ${0##*/} src dst title base_url" >&2
+	exit 1
+}
+
+version(){
+    echo "version: ${0##*/} $VERSION" >&1
+    exit 0
+}
+
+
+no_dir() {
+	echo "${0##*/}: $1: No such directory" >&2
+	exit 2
+}
+
+list_dirs() {
+	cd "$1" && eval "find . -type d ! -name '.' ! -path '*/_*' $IGNORE"
+}
+
+
+list_files() {
+	cd "$1" && eval "find . -type f ! -name '.' ! -path '*/_*' $IGNORE"
+}
+
+
+list_dependant_files () {
+ 	e="\\( -name '*.html' -o -name '*.md' -o -name '*.css' -o -name '*.js' \\)"
+	cd "$1" && eval "find . -type f ! -name '.' ! -path '*/_*' $IGNORE $e"
+}
+
+list_newer_files() {
+	cd "$1" && eval "find . -type f ! -name '.' $IGNORE -newer $2"
+}
+
+
+has_partials() {
+	grep -qE '^./_.*\.html$|^./_.*\.js$|^./_.*\.css$'
+}
+
+
+list_affected_files() {
+	fs=$(list_newer_files "$1" "$2")
+
+	if echo "$fs" | has_partials; then 
+        list_dependant_files "$1"
+	else 
+        echo "$fs"
+	fi
+}
+
+
+render_md_files_pandoc() {
+    #FIXME: los archivos tienen que entrar de uno en uno aqui
+	# Check if the previous file has a date in it
+	while read -r f; do
+        render_pdf_file "$1/$f" > "$2/${f%\.md}.pdf"
+    done < <(ls "$1" | grep '\.md$')
+}
+
+render_pdf_file(){
+    local file="$1" 
+    
+    [ -z "$file" ] && return 1
+
+    case "$PAPER_SIZE" in
+        "A5"|"a5") PAPER_SIZE='a5paper' ;;
+        *) PAPER_SIZE='a4paper'
+    esac
+
+    pandoc  \
+        --from=markdown \
+        --to=pdf \
+        --eol=crlf \
+        --highlight-style=tango \
+        --pdf-engine=xelatex \
+        --table-of-contents --toc-depth 4 \
+        --output='-' \
+        "$file"
+#       -V geometry:"$PAER_SIZE" \
+#       -V geometry:margin=2cm \
+#       -V mainfont="$MAIN_FONT" \ 
+#       -V monofont="$MONO_FONT" \
+#       -V lang=en \
+}
+
+
+list_pages() {
+	e="\\( -name '*.html' -o -name '*.md' \\)"
+	cd "$1" && eval "find . -type f ! -path '*/.*' ! -path '*/_*' $IGNORE $e" |
+	sed 's#^./##;s#.md$#.html#;s#/index.html$#/#'
+}
+
+get_date(){
+    local file="$1"
+    if [ -f "$file" ]; then
+        # search for date pattern
+        date
+    else
+        exit 2
+    fi
+}
+
+main "$@"
